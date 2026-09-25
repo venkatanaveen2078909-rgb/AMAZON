@@ -1,0 +1,6 @@
+experiment_id,date,description,blocking_recall,val_entities,val_pairs_scored,threshold,precision,recall,macro_f05,singleton_acc,multi_f05,tp,fp,fn,notes
+EXP-02-BLOCKING,2026-09-25,Upgraded multi-view blocking (Rare token + Addr Num+Street + Phonetic + Prefix + Postal),0.9258,20000,15616744,,,,,,,,,,"Avg candidates/S1: 780.8, Missed: 5158"
+EXP-02B-BLOCKING,2026-09-25,7-channel high-recall union blocking (Composite + AddrNumWord + RareToken + Prefix3 + Phone),0.9363,20000,11383381,,,,,,,,,,"Avg candidates/S1: 569.2, Missed: 4424"
+EXP-02C-BLOCKING,2026-09-25,8-channel union blocking with Rare Address Landmark Indexing,0.9866,20000,15227229,,,,,,,,,,"Avg candidates/S1: 761.4, Missed: 929"
+EXP-03-GBM-FEATURES,2026-09-25,48 features + Stratified Hard Negatives + 8-channel Blocking,0.9869,5000,3801682,0.96,0.9476,0.9589,0.9394,0.8745,0.9432,16677,1167,718,"Best Iter: 272, Runtime: 20.5m"
+EXP-04-TIERED-RULES,2026-09-25,Tiered Evidence Thresholding + Contradiction Veto + Margin Pruning,0.9869,5000,3755490,Base:0.97_Miss:0.99,0.9668,0.9288,0.9456,0.9077,0.9478,16118,656,1277,"Params: {'base_thr': 0.97, 'missing_addr_thr': 0.99, 'high_conf_thr': 0.85, 'margin': 0.15}, Runtime: 18.6m"
