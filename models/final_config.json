@@ -1,0 +1,17 @@
+{
+  "model_type": "LightGBM Binary Classifier (GBDT)",
+  "objective": "binary",
+  "metric": "binary_logloss",
+  "boosting_type": "gbdt",
+  "learning_rate": 0.03,
+  "num_leaves": 63,
+  "max_depth": 8,
+  "feature_fraction": 0.85,
+  "bagging_fraction": 0.85,
+  "bagging_freq": 4,
+  "min_child_samples": 40,
+  "is_unbalance": true,
+  "seed": 42,
+  "best_iteration": 272,
+  "val_logloss": 0.0148429
+}
