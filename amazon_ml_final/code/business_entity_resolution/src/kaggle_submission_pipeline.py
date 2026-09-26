@@ -353,6 +353,9 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
         t_idx_total = time.perf_counter() - t_idx_start
         print(f"  8 inverted indices built in {t_idx_total:.1f}s (RAM: {get_ram_mb():.1f} MB).", flush=True)
 
+    # Pre-tokenize candidate names for fast ranking
+    c_toks = [set(x.split()) if x else set() for x in c_nn]
+
     # 4. Checkpoint Resumption
     processed_s1_count = 0
     if limit is None and checkpoint_file.exists() and matching_out.exists() and candidate_out.exists():
@@ -419,9 +422,14 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
             s1_cand_sets = []
 
             for i in range(n_chunk):
-                s_cands = set(idx_exact.get(s1_nns[i], []))
-
                 nn_v = s1_nn[i]
+                nns_v = s1_nns[i]
+                na_v = s1_na[i]
+                pc_v = s1_pc[i]
+                s_tok = set(nn_v.split()) if nn_v else set()
+
+                s_cands = set(idx_exact.get(nns_v, []))
+
                 pfx3 = nn_v[:3] if len(nn_v) >= 3 else nn_v
                 if pfx3:
                     b = idx_pfx3.get(pfx3, [])
@@ -437,11 +445,9 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
                             b = idx_rare_tok.get(w, [])
                             if len(b) <= 800: s_cands.update(b)
 
-                pc_v = s1_pc[i]
                 if pc_v:
                     s_cands.update(idx_postal.get(pc_v, []))
 
-                na_v = s1_na[i]
                 if na_v:
                     for ak in get_addr_keys(na_v):
                         b = idx_addr_key.get(ak, [])
@@ -455,8 +461,29 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
                     b = idx_comp.get(ck, [])
                     if len(b) <= 400: s_cands.update(b)
 
-                if len(s_cands) > 50:
-                    c_list = list(s_cands)[:50]
+                # Deterministic Pre-Ranking before Capping
+                if len(s_cands) > 80:
+                    ranked_scores = []
+                    for j in s_cands:
+                        score = 0
+                        if nns_v and nns_v == c_nns[j]:
+                            score += 1000
+                        elif nn_v and nn_v == c_nn[j]:
+                            score += 800
+
+                        if pc_v and c_pc[j] and pc_v == c_pc[j]:
+                            score += 300
+
+                        c_t = c_toks[j]
+                        if s_tok and c_t:
+                            common = len(s_tok & c_t)
+                            if common > 0:
+                                score += int(50 * common / max(len(s_tok | c_t), 1))
+
+                        ranked_scores.append((score, j))
+
+                    ranked_scores.sort(key=lambda x: -x[0])
+                    c_list = [j for _, j in ranked_scores[:80]]
                 else:
                     c_list = list(s_cands)
 
