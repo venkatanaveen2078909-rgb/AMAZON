@@ -152,8 +152,8 @@ def compute_pair_features(s1_nn: str, s1_na: str, s1_c: str, s1_rn: str, s1_ra: 
     post_match = 1.0 if (post_avail and s1p == cp_) else 0.0
     post_mismatch = 1.0 if (post_avail and s1p != cp_) else 0.0
     
-    sn = set(re.findall(r'\d+', s1_ra)) if s1_ra else set()
-    cn = set(re.findall(r'\d+', c_ra)) if c_ra else set()
+    sn = set(re.findall(r'\d+', str(s1_ra))) if (s1_ra and str(s1_ra) != 'nan') else set()
+    cn = set(re.findall(r'\d+', str(c_ra))) if (c_ra and str(c_ra) != 'nan') else set()
     num_jacc = len(sn & cn) / max(len(sn | cn), 1) if (sn or cn) else 0.0
     num_match_count = float(len(sn & cn))
     
