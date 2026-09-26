@@ -1,7 +1,7 @@
 {
   "experiment_id": "EXP-04-TIERED-RULES",
-  "base_thr": 0.97,
-  "missing_addr_thr": 0.99,
+  "base_thr": 0.88,
+  "missing_addr_thr": 0.92,
   "high_conf_thr": 0.85,
   "margin": 0.15,
   "contradiction_veto_thr": 0.8,

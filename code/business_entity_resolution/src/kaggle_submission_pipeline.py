@@ -98,28 +98,10 @@ def resolve_paths():
     
     return train_dir, test_dir, output_dir, cache_dir, model_dir
 
-# ── Feature Definitions (48 Pairwise Dimensions) ──────────────────────────────
-FEATURE_NAMES = [
-    # 1. Name Similarities (12)
-    'name_jaccard', 'name_tri_jacc', 'name_lev', 'name_tsort', 'name_tset',
-    'name_partial', 'name_wr', 'name_exact', 'name_exact_sorted', 'name_len_d',
-    'name_len_r', 'name_pfx3_eq',
-    # 2. Address Similarities (10)
-    'addr_jaccard', 'addr_tri_jacc', 'addr_lev', 'addr_tsort', 'addr_tset',
-    'addr_partial', 'addr_num_exact', 'num_jacc', 'addr_len_d', 'addr_len_r',
-    # 3. Phonetic Similarities (4)
-    'phon_overlap', 'phon_jacc', 'addr_phon_overlap', 'addr_phon_jacc',
-    # 4. Postal Structural Features (3)
-    'postal_match', 'postal_mismatch', 'postal_avail',
-    # 5. Evidence Availability & Missingness (6)
-    'both_name_present', 'both_addr_present', 's1_addr_missing', 'cand_addr_missing',
-    'both_addr_missing', 'same_country',
-    # 6. Interaction Terms & Contradiction Penalties (13)
-    'name_addr_prod_tsort', 'name_addr_prod_tset', 'name_addr_prod_lev',
-    'name_addr_min_tsort', 'name_addr_min_tset', 'name_addr_max_tsort',
-    'name_addr_max_tset', 'name_addr_gap', 'name_with_no_addr',
-    'comb_tsort', 'comb_tset', 'comb_lev', 'contradiction_flag'
-]
+# ── Feature Definitions & Computation ─────────────────────────────────────────
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from features import FEATURE_NAMES, compute_pair_features
+
 
 # ── Normalization Regexes ─────────────────────────────────────────────────────
 _LEGAL = re.compile(
@@ -219,118 +201,7 @@ def get_name_addr_composite(nn_str: str, na_str: str) -> tuple:
         return (f"{pfx2}_{nums[0]}",)
     return ()
 
-# ── Feature Computer ──────────────────────────────────────────────────────────
-def trigram_jaccard(s1: str, s2: str) -> float:
-    if not s1 or not s2: return 0.0
-    t1 = {s1[i:i+3] for i in range(len(s1)-2)} if len(s1) >= 3 else {s1}
-    t2 = {s2[i:i+3] for i in range(len(s2)-2)} if len(s2) >= 3 else {s2}
-    u = len(t1 | t2)
-    return len(t1 & t2) / u if u > 0 else 0.0
 
-def compute_pair_features(s1_nn, s1_na, s1_country, s1_rn, s1_ra,
-                          c_nn, c_na, c_country, c_rn, c_ra,
-                          s1_pc, c_pc):
-    feats = np.zeros(48, dtype=np.float32)
-
-    # 1. Name Similarities
-    if s1_nn and c_nn:
-        tok1, tok2 = set(s1_nn.split()), set(c_nn.split())
-        u = len(tok1 | tok2)
-        feats[0] = len(tok1 & tok2) / u if u > 0 else 0.0
-        feats[1] = trigram_jaccard(s1_nn, c_nn)
-        feats[2] = fuzz.ratio(s1_nn, c_nn) / 100.0
-        feats[3] = fuzz.token_sort_ratio(s1_nn, c_nn) / 100.0
-        feats[4] = fuzz.token_set_ratio(s1_nn, c_nn) / 100.0
-        feats[5] = fuzz.partial_ratio(s1_nn, c_nn) / 100.0
-        feats[6] = fuzz.WRatio(s1_nn, c_nn) / 100.0
-        feats[7] = 1.0 if s1_nn == c_nn else 0.0
-        feats[8] = 1.0 if feats[3] == 1.0 else 0.0
-        feats[9] = abs(len(s1_nn) - len(c_nn))
-        feats[10] = min(len(s1_nn), len(c_nn)) / max(len(s1_nn), len(c_nn), 1)
-        feats[11] = 1.0 if s1_nn[:3] == c_nn[:3] else 0.0
-
-    # 2. Address Similarities
-    both_addr = 1.0 if (s1_na and c_na) else 0.0
-    if both_addr:
-        tok1, tok2 = set(s1_na.split()), set(c_na.split())
-        u = len(tok1 | tok2)
-        feats[12] = len(tok1 & tok2) / u if u > 0 else 0.0
-        feats[13] = trigram_jaccard(s1_na, c_na)
-        feats[14] = fuzz.ratio(s1_na, c_na) / 100.0
-        feats[15] = fuzz.token_sort_ratio(s1_na, c_na) / 100.0
-        feats[16] = fuzz.token_set_ratio(s1_na, c_na) / 100.0
-        feats[17] = fuzz.partial_ratio(s1_na, c_na) / 100.0
-        
-        n1 = fast_get_nums(s1_na)
-        n2 = fast_get_nums(c_na)
-        feats[18] = 1.0 if (n1 and n2 and n1[0] == n2[0]) else 0.0
-        sn1, sn2 = set(n1), set(n2)
-        un = len(sn1 | sn2)
-        feats[19] = len(sn1 & sn2) / un if un > 0 else 0.0
-        feats[20] = abs(len(s1_na) - len(c_na))
-        feats[21] = min(len(s1_na), len(c_na)) / max(len(s1_na), len(c_na), 1)
-
-    # 3. Phonetics
-    pk1 = set(memoizer.get_keys(s1_rn))
-    pk2 = set(memoizer.get_keys(c_rn))
-    if pk1 and pk2:
-        feats[22] = len(pk1 & pk2)
-        feats[23] = len(pk1 & pk2) / len(pk1 | pk2)
-
-    if s1_ra and c_ra:
-        apk1 = set(memoizer.get_keys(s1_ra))
-        apk2 = set(memoizer.get_keys(c_ra))
-        if apk1 and apk2:
-            feats[24] = len(apk1 & apk2)
-            feats[25] = len(apk1 & apk2) / len(apk1 | apk2)
-
-    # 4. Postal
-    if s1_pc and c_pc:
-        feats[26] = 1.0 if s1_pc == c_pc else 0.0
-        feats[27] = 1.0 if s1_pc != c_pc else 0.0
-        feats[28] = 1.0
-    elif s1_pc or c_pc:
-        feats[28] = 0.5
-
-    # 5. Missingness
-    feats[29] = 1.0 if (s1_nn and c_nn) else 0.0
-    feats[30] = both_addr
-    feats[31] = 1.0 if (not s1_na and c_na) else 0.0
-    feats[32] = 1.0 if (s1_na and not c_na) else 0.0
-    feats[33] = 1.0 if (not s1_na and not c_na) else 0.0
-    feats[34] = 1.0 if s1_country == c_country else 0.0
-
-    # 6. Cross-Field Interactions & Contradiction Penalties
-    n_tsort = feats[3]
-    n_tset  = feats[4]
-    n_lev   = feats[2]
-    a_tsort = feats[15]
-    a_tset  = feats[16]
-    a_lev   = feats[14]
-
-    feats[35] = n_tsort * a_tsort
-    feats[36] = n_tset * a_tset
-    feats[37] = n_lev * a_lev
-    feats[38] = min(n_tsort, a_tsort)
-    feats[39] = min(n_tset, a_tset)
-    feats[40] = max(n_tsort, a_tsort)
-    feats[41] = max(n_tset, a_tset)
-    feats[42] = abs(n_tsort - a_tsort) if both_addr else 0.0
-    feats[43] = n_tsort * (1.0 - both_addr)
-
-    if s1_nn and c_nn and (s1_na or c_na):
-        c1 = f"{s1_nn} {s1_na}".strip()
-        c2 = f"{c_nn} {c_na}".strip()
-        feats[44] = fuzz.token_sort_ratio(c1, c2) / 100.0
-        feats[45] = fuzz.token_set_ratio(c1, c2) / 100.0
-        feats[46] = fuzz.ratio(c1, c2) / 100.0
-
-    # Contradiction flag
-    if both_addr and len(s1_na) >= 8 and len(c_na) >= 8:
-        if a_tset < 0.20 and (feats[27] == 1.0 or feats[18] == 0.0):
-            feats[47] = 1.0
-
-    return feats
 
 # ── Production Inference & Checkpointing ──────────────────────────────────────
 def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
@@ -615,7 +486,7 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
                         s1_pc[s1_i], c_pc[cand_j]
                     )
                     X_batch[p_idx] = feat
-                    pair_meta.append((s1_i, c_ids[cand_j], feat[30], feat[32], feat[3], feat[16], feat[47]))
+                    pair_meta.append((s1_i, c_ids[cand_j], feat[29], feat[31], feat[3], feat[16], feat[41]))
 
                 t_fc = time.perf_counter() - t_fc0
                 cum_feat_comp_time += t_fc
@@ -635,12 +506,12 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
                         continue
 
                     # 2. Tiered Evidence Thresholds
-                    if both_a == 1.0 and n_tsort >= 0.80 and a_tset >= 0.80:
+                    if both_a == 1.0 and n_tsort >= 0.80 and a_tset >= 0.70:
                         eff_thr = 0.85
                     elif cand_miss == 1.0 or both_a == 0.0:
-                        eff_thr = 0.99
+                        eff_thr = 0.92
                     else:
-                        eff_thr = 0.97
+                        eff_thr = 0.88
 
                     if p_score >= eff_thr:
                         s1_scores[s1_i].append((cid, p_score))
