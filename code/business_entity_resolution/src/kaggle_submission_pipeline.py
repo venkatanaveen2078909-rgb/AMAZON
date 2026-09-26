@@ -54,42 +54,43 @@ if hasattr(sys.stderr, "reconfigure"):
 # ── Environment & Path Resolution ─────────────────────────────────────────────
 def resolve_paths():
     """Detect runtime environment and set standard paths."""
-    kaggle_input = Path("/kaggle/input")
-    kaggle_working = Path("/kaggle/working")
-    
-    if kaggle_input.exists():
-        print("[Env] Running in Kaggle environment.", flush=True)
-        ds_matches = list(kaggle_input.glob("**/test_source1.tsv"))
+    curr = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
+    root = curr
+    for _ in range(5):
+        if (root / "6ab10eb3b23ba_student_resource").exists():
+            break
+        root = root.parent
+        
+    base_res = root / "6ab10eb3b23ba_student_resource" / "student_resource" / "dataset"
+    if base_res.exists():
+        test_dir = base_res / "test"
+        train_dir = base_res / "train"
+    elif (root / "dataset" / "test").exists():
+        test_dir = root / "dataset" / "test"
+        train_dir = root / "dataset" / "train"
+    elif Path("/kaggle/input").exists():
+        ds_matches = list(Path("/kaggle/input").glob("**/test_source1.tsv"))
         if ds_matches:
             test_dir = ds_matches[0].parent
             train_dir = test_dir.parent / "train" if (test_dir.parent / "train").exists() else test_dir
         else:
-            test_dir = kaggle_input / "amazon-ml-challenge-2026" / "dataset" / "test"
-            train_dir = kaggle_input / "amazon-ml-challenge-2026" / "dataset" / "train"
-            
-        output_dir = kaggle_working / "output"
-        cache_dir = kaggle_working / "cache"
-        model_dir = kaggle_working / "models"
-    else:
-        print("[Env] Running in Local / Server environment.", flush=True)
-        curr = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
-        root = curr
-        for _ in range(4):
-            if (root / "6ab10eb3b23ba_student_resource").exists():
-                break
-            root = root.parent
-            
-        base_res = root / "6ab10eb3b23ba_student_resource" / "student_resource" / "dataset"
-        if base_res.exists():
             test_dir = base_res / "test"
             train_dir = base_res / "train"
-        else:
-            test_dir = root / "dataset" / "test"
-            train_dir = root / "dataset" / "train"
-            
-        output_dir = root / "output"
-        cache_dir = root / "code" / "business_entity_resolution" / "cache"
-        model_dir = root / "models"
+    else:
+        test_dir = root / "dataset" / "test"
+        train_dir = root / "dataset" / "train"
+        
+    output_dir = root / "amazon_ml_final" / "output" if (root / "amazon_ml_final").exists() else root / "output"
+    cache_dir = root / "code" / "business_entity_resolution" / "cache"
+    
+    # Model Directory Resolution
+    model_candidates = [
+        root / "models",
+        root / "amazon_ml_final" / "models",
+        Path("/kaggle/working/AMAZON/models"),
+        Path("/kaggle/working/AMAZON/amazon_ml_final/models")
+    ]
+    model_dir = next((p for p in model_candidates if (p / "final_model.txt").exists()), root / "models")
         
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -357,7 +358,12 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
     t_norm_total = 0.0
     t_idx_total = 0.0
 
-    cache_file = cache_dir / "test_candidate_index.pkl"
+    cache_candidates = [
+        cache_dir / "test_candidate_index.pkl",
+        Path("/kaggle/working/AMAZON/code/business_entity_resolution/cache/test_candidate_index.pkl"),
+        Path("/kaggle/working/AMAZON/amazon_ml_final/code/business_entity_resolution/cache/test_candidate_index.pkl")
+    ]
+    cache_file = next((p for p in cache_candidates if p.exists()), cache_dir / "test_candidate_index.pkl")
     if cache_file.exists():
         print(f"\n[2/4] Loading candidate pool & 8 inverted indices from cache: {cache_file}...", flush=True)
         t_c0 = time.perf_counter()
@@ -727,9 +733,13 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
 
 if __name__ == "__main__":
     train_dir, test_dir, output_dir, cache_dir, model_dir = resolve_paths()
-    model_path = model_dir / "final_model.txt"
-    if not model_path.exists():
-        model_path = cache_dir / "exp03_model.txt"
+    model_candidates = [
+        model_dir / "final_model.txt",
+        Path("/kaggle/working/AMAZON/models/final_model.txt"),
+        Path("/kaggle/working/AMAZON/amazon_ml_final/models/final_model.txt"),
+        cache_dir / "exp03_model.txt"
+    ]
+    model_path = next((p for p in model_candidates if p.exists()), model_dir / "final_model.txt")
         
     parser = argparse.ArgumentParser()
     parser.add_argument("--chunk-size", type=int, default=30000)
