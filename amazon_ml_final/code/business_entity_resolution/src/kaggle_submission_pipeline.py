@@ -2,7 +2,7 @@
 r"""
 ================================================================================
 Amazon ML Challenge 2026: Business Entity Resolution
-Production End-to-End Pipeline & Kaggle Execution Script
+Production End-to-End Pipeline & Kaggle Execution Script (Memory-Optimized)
 ================================================================================
 Configuration: EXP-04 (8-Channel Blocking + 48 Features GBDT + Tiered Decision Rules)
 Validation Score: Macro F0.5 = 0.9456 (Precision = 0.9668, Singleton Acc = 0.9077)
@@ -20,9 +20,10 @@ import re
 import math
 import time
 import json
+import pickle
 import argparse
 from pathlib import Path
-from collections import defaultdict, Counter
+from collections import defaultdict
 from typing import Dict, Set, List, Tuple
 
 import numpy as np
@@ -30,6 +31,19 @@ import pandas as pd
 import lightgbm as lgb
 from rapidfuzz import fuzz
 from metaphone import doublemetaphone
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+def get_ram_mb() -> float:
+    if psutil is not None:
+        try:
+            return psutil.Process().memory_info().rss / (1024 * 1024)
+        except Exception:
+            return 0.0
+    return 0.0
 
 # UTF-8 Configuration
 if hasattr(sys.stdout, "reconfigure"):
@@ -40,15 +54,11 @@ if hasattr(sys.stderr, "reconfigure"):
 # ── Environment & Path Resolution ─────────────────────────────────────────────
 def resolve_paths():
     """Detect runtime environment and set standard paths."""
-    base_dir = Path.cwd()
-    
-    # Kaggle environment
     kaggle_input = Path("/kaggle/input")
     kaggle_working = Path("/kaggle/working")
     
     if kaggle_input.exists():
         print("[Env] Running in Kaggle environment.", flush=True)
-        # Find dataset dir inside /kaggle/input/
         ds_matches = list(kaggle_input.glob("**/test_source1.tsv"))
         if ds_matches:
             test_dir = ds_matches[0].parent
@@ -62,7 +72,6 @@ def resolve_paths():
         model_dir = kaggle_working / "models"
     else:
         print("[Env] Running in Local / Server environment.", flush=True)
-        # Search relative paths
         curr = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
         root = curr
         for _ in range(4):
@@ -178,7 +187,7 @@ class PhoneticMemoizer:
         if not text: return ()
         keys = []
         for tok in str(text).lower().split():
-            if len(tok) >= 2:
+            if len(tok) >= 3:
                 if tok not in self.memo:
                     try:
                         p, s = doublemetaphone(tok)
@@ -190,14 +199,6 @@ class PhoneticMemoizer:
         return tuple(keys)
 
 memoizer = PhoneticMemoizer()
-
-def get_rare_tokens(norm_name_str: str) -> tuple:
-    if not norm_name_str: return ()
-    return tuple(w for w in norm_name_str.split() if len(w) >= 3)
-
-def get_rare_addr_tokens(na_str: str) -> tuple:
-    if not na_str: return ()
-    return tuple(w for w in na_str.split() if len(w) >= 4 and not w.isdigit() and w not in ADDR_STOPWORDS)
 
 def get_addr_keys(na_str: str) -> tuple:
     if not na_str: return ()
@@ -323,62 +324,20 @@ def compute_pair_features(s1_nn, s1_na, s1_country, s1_rn, s1_ra,
         feats[45] = fuzz.token_set_ratio(c1, c2) / 100.0
         feats[46] = fuzz.ratio(c1, c2) / 100.0
 
-    # Contradiction flag: addresses exist and are long, but dissimilar and postal mismatch
+    # Contradiction flag
     if both_addr and len(s1_na) >= 8 and len(c_na) >= 8:
         if a_tset < 0.20 and (feats[27] == 1.0 or feats[18] == 0.0):
             feats[47] = 1.0
 
     return feats
 
-# ── Metric Evaluator ──────────────────────────────────────────────────────────
-def f05_macro(preds: Dict[str, Set[str]], ground_truth: Dict[str, Set[str]]) -> Dict:
-    all_s1 = set(ground_truth.keys())
-    scores = []
-    tp_tot = fp_tot = fn_tot = 0
-    singleton_scores = []
-    multi_scores = []
-
-    for s1_id in all_s1:
-        t_set = ground_truth[s1_id]
-        p_set = preds.get(s1_id, set())
-
-        if len(t_set) == 0:
-            s_acc = 1.0 if len(p_set) == 0 else 0.0
-            scores.append(s_acc)
-            singleton_scores.append(s_acc)
-            fp_tot += len(p_set)
-        else:
-            tp = len(p_set & t_set)
-            fp = len(p_set - t_set)
-            fn = len(t_set - p_set)
-            tp_tot += tp
-            fp_tot += fp
-            fn_tot += fn
-
-            denom = 4 * len(p_set) + len(t_set)
-            s_f05 = (5 * tp) / denom if denom > 0 else 0.0
-            scores.append(s_f05)
-            multi_scores.append(s_f05)
-
-    macro_f05 = float(np.mean(scores)) if scores else 0.0
-    macro_prec = tp_tot / (tp_tot + fp_tot) if (tp_tot + fp_tot) > 0 else 0.0
-    macro_rec = tp_tot / (tp_tot + fn_tot) if (tp_tot + fn_tot) > 0 else 0.0
-
-    return {
-        "macro_f05": macro_f05,
-        "macro_prec": macro_prec,
-        "macro_rec": macro_rec,
-        "singleton_acc": float(np.mean(singleton_scores)) if singleton_scores else 0.0,
-        "multi_f05": float(np.mean(multi_scores)) if multi_scores else 0.0,
-        "tp": tp_tot, "fp": fp_tot, "fn": fn_tot, "total_entities": len(all_s1)
-    }
-
 # ── Production Inference & Checkpointing ──────────────────────────────────────
 def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
                              chunk_size: int = 30000, limit: int = None):
-    t_start = time.time()
+    t_start = time.perf_counter()
     print("=" * 75, flush=True)
     print("PRODUCTION INFERENCE RUNNER — AMAZON ML CHALLENGE 2026", flush=True)
+    print(f"Initial RAM RSS: {get_ram_mb():.1f} MB", flush=True)
     print("=" * 75, flush=True)
 
     matching_out = output_dir / "matching_results.tsv"
@@ -386,101 +345,140 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
     checkpoint_file = output_dir / ".inference_checkpoint.json"
 
     # 1. Load Model
+    t_m0 = time.perf_counter()
     print(f"Loading LightGBM Model from {model_path}...", flush=True)
     model = lgb.Booster(model_file=str(model_path))
+    t_model_load = time.perf_counter() - t_m0
+    print(f"  Model loaded in {t_model_load:.3f}s (RAM: {get_ram_mb():.1f} MB).", flush=True)
 
-    # 2. Load Candidate Datasets (Test S2 + S3)
-    s2_path = test_dir / "test_source2.tsv"
-    s3_path = test_dir / "test_source3.tsv"
+    # 2. Candidate Index & Normalization Setup (Cache or Build)
+    t_cache_load = 0.0
+    t_cand_load = 0.0
+    t_norm_total = 0.0
+    t_idx_total = 0.0
 
-    print(f"\n[1/4] Loading candidate sources...", flush=True)
-    t0 = time.time()
-    s2 = pd.read_csv(s2_path, sep="\t", dtype=str, keep_default_na=False, encoding="utf-8")
-    print(f"  Loaded {len(s2):,} S2 rows ({time.time()-t0:.1f}s).", flush=True)
+    cache_file = cache_dir / "test_candidate_index.pkl"
+    if cache_file.exists():
+        print(f"\n[2/4] Loading candidate pool & 8 inverted indices from cache: {cache_file}...", flush=True)
+        t_c0 = time.perf_counter()
+        with open(cache_file, "rb") as f:
+            cache_payload = pickle.load(f)
+        n_cands = cache_payload["n_cands"]
+        c_ids = cache_payload["c_ids"]
+        c_raw_names = cache_payload["c_raw_names"]
+        c_raw_addrs = cache_payload["c_raw_addrs"]
+        c_countries = cache_payload["c_countries"]
+        c_nn = cache_payload["c_nn"]
+        c_nns = cache_payload["c_nns"]
+        c_na = cache_payload["c_na"]
+        c_pc = cache_payload["c_pc"]
+        idx_exact = cache_payload["idx_exact"]
+        idx_pfx3 = cache_payload["idx_pfx3"]
+        idx_phone = cache_payload["idx_phone"]
+        idx_postal = cache_payload["idx_postal"]
+        idx_addr_key = cache_payload["idx_addr_key"]
+        idx_comp = cache_payload["idx_comp"]
+        idx_rare_tok = cache_payload["idx_rare_tok"]
+        idx_rare_addr = cache_payload["idx_rare_addr"]
+        if "memoizer_memo" in cache_payload:
+            memoizer.memo.update(cache_payload["memoizer_memo"])
+        del cache_payload
+        t_cache_load = time.perf_counter() - t_c0
+        print(f"  Loaded {n_cands:,} candidate entities & 8 indices in {t_cache_load:.1f}s (RAM: {get_ram_mb():.1f} MB).", flush=True)
+    else:
+        # Load Candidate Datasets (Test S2 + S3)
+        s2_path = test_dir / "test_source2.tsv"
+        s3_path = test_dir / "test_source3.tsv"
 
-    t0 = time.time()
-    s3 = pd.read_csv(s3_path, sep="\t", dtype=str, keep_default_na=False, encoding="utf-8")
-    print(f"  Loaded {len(s3):,} S3 rows ({time.time()-t0:.1f}s).", flush=True)
+        print(f"\n[1/4] Loading candidate sources...", flush=True)
+        t0 = time.perf_counter()
+        s2 = pd.read_csv(s2_path, sep="\t", dtype=str, keep_default_na=False, encoding="utf-8")
+        t_s2 = time.perf_counter() - t0
+        print(f"  Loaded {len(s2):,} S2 rows ({t_s2:.1f}s, RAM: {get_ram_mb():.1f} MB).", flush=True)
 
-    cand_df = pd.concat([s2, s3], ignore_index=True)
-    del s2, s3
-    gc.collect()
-    n_cands = len(cand_df)
-    print(f"  Candidate pool size: {n_cands:,} entities.", flush=True)
+        t0 = time.perf_counter()
+        s3 = pd.read_csv(s3_path, sep="\t", dtype=str, keep_default_na=False, encoding="utf-8")
+        t_s3 = time.perf_counter() - t0
+        print(f"  Loaded {len(s3):,} S3 rows ({t_s3:.1f}s, RAM: {get_ram_mb():.1f} MB).", flush=True)
 
-    # 3. Normalization & Inverted Indexing
-    print(f"\n[2/4] High-speed normalization & token frequency profiling...", flush=True)
-    t_norm = time.time()
-    c_ids = cand_df["entity_id"].values
-    c_raw_names = cand_df["business_name"].values
-    c_raw_addrs = cand_df["business_address"].values
-    c_countries = cand_df["country"].values
+        cand_df = pd.concat([s2, s3], ignore_index=True)
+        del s2, s3
+        gc.collect()
+        n_cands = len(cand_df)
+        print(f"  Candidate pool size: {n_cands:,} entities (RAM: {get_ram_mb():.1f} MB).", flush=True)
 
-    c_nn = [fast_norm_name(x) for x in c_raw_names]
-    c_nns = [fast_norm_name_sorted(nn) for nn in c_nn]
-    c_na = [fast_norm_addr(x) for x in c_raw_addrs]
-    c_pc = [fast_get_postal(x) for x in c_raw_addrs]
-    print(f"  Normalized {n_cands:,} candidates in {time.time() - t_norm:.1f}s.", flush=True)
+        # Normalization & Inverted Indexing
+        print(f"\n[2/4] High-speed normalization & token frequency profiling...", flush=True)
+        t_norm_start = time.perf_counter()
+        c_ids = cand_df["entity_id"].values
+        c_raw_names = cand_df["business_name"].values
+        c_raw_addrs = cand_df["business_address"].values
+        c_countries = cand_df["country"].values
 
-    print(f"\n[3/4] Building 8 inverted blocking indices...", flush=True)
-    t_idx = time.time()
-    idx_exact = defaultdict(list)
-    idx_pfx3 = defaultdict(list)
-    idx_phone = defaultdict(list)
-    idx_postal = defaultdict(list)
-    idx_addr_key = defaultdict(list)
-    idx_comp = defaultdict(list)
+        c_nn = [fast_norm_name(x) for x in c_raw_names]
+        c_nns = [fast_norm_name_sorted(nn) for nn in c_nn]
+        c_na = [fast_norm_addr(x) for x in c_raw_addrs]
+        c_pc = [fast_get_postal(x) for x in c_raw_addrs]
+        t_norm_total = time.perf_counter() - t_norm_start
+        print(f"  Normalized {n_cands:,} candidates in {t_norm_total:.1f}s (RAM: {get_ram_mb():.1f} MB).", flush=True)
 
-    name_tok_cnt = Counter()
-    addr_tok_cnt = Counter()
+        print(f"\n[3/4] Building 8 inverted blocking indices (single pass)...", flush=True)
+        t_idx_start = time.perf_counter()
+        idx_exact = defaultdict(list)
+        idx_pfx3 = defaultdict(list)
+        idx_phone = defaultdict(list)
+        idx_postal = defaultdict(list)
+        idx_addr_key = defaultdict(list)
+        idx_comp = defaultdict(list)
+        idx_rare_tok = defaultdict(list)
+        idx_rare_addr = defaultdict(list)
 
-    for i in range(n_cands):
-        nns_v = c_nns[i]
-        if nns_v: idx_exact[nns_v].append(i)
-        nn_v = c_nn[i]
-        if len(nn_v) >= 3: idx_pfx3[nn_v[:3]].append(i)
-        for pk in memoizer.get_keys(c_raw_names[i]):
-            idx_phone[pk].append(i)
-        pc_v = c_pc[i]
-        if pc_v: idx_postal[pc_v].append(i)
-        na_v = c_na[i]
-        for ak in get_addr_keys(na_v):
-            idx_addr_key[ak].append(i)
-        for ck in get_name_addr_composite(nn_v, na_v):
-            idx_comp[ck].append(i)
-        for w in get_rare_tokens(nn_v):
-            name_tok_cnt[w] += 1
-        for w in get_rare_addr_tokens(na_v):
-            addr_tok_cnt[w] += 1
+        for i in range(n_cands):
+            nns_v = c_nns[i]
+            if nns_v: idx_exact[nns_v].append(i)
+            
+            nn_v = c_nn[i]
+            if len(nn_v) >= 3:
+                idx_pfx3[nn_v[:3]].append(i)
+                # Rare name tokens
+                for w in nn_v.split():
+                    if len(w) >= 3:
+                        idx_rare_tok[w].append(i)
 
-    idx_rare_tok = defaultdict(list)
-    idx_rare_addr = defaultdict(list)
-    for i in range(n_cands):
-        nn_v = c_nn[i]
-        for w in get_rare_tokens(nn_v):
-            if name_tok_cnt[w] <= 10000:
-                idx_rare_tok[w].append(i)
-        na_v = c_na[i]
-        for w in get_rare_addr_tokens(na_v):
-            if addr_tok_cnt[w] <= 600:
-                idx_rare_addr[w].append(i)
+            for pk in memoizer.get_keys(c_raw_names[i]):
+                idx_phone[pk].append(i)
 
-    idx_exact = dict(idx_exact)
-    idx_pfx3 = dict(idx_pfx3)
-    idx_phone = dict(idx_phone)
-    idx_postal = dict(idx_postal)
-    idx_addr_key = dict(idx_addr_key)
-    idx_comp = dict(idx_comp)
-    idx_rare_tok = dict(idx_rare_tok)
-    idx_rare_addr = dict(idx_rare_addr)
+            pc_v = c_pc[i]
+            if pc_v: idx_postal[pc_v].append(i)
 
-    del name_tok_cnt, addr_tok_cnt, cand_df
-    gc.collect()
-    print(f"  8 inverted indices built in {time.time() - t_idx:.1f}s.", flush=True)
+            na_v = c_na[i]
+            if na_v:
+                for ak in get_addr_keys(na_v):
+                    idx_addr_key[ak].append(i)
+                for w in na_v.split():
+                    if len(w) >= 4 and not w.isdigit() and w not in ADDR_STOPWORDS:
+                        idx_rare_addr[w].append(i)
+
+            for ck in get_name_addr_composite(nn_v, na_v):
+                idx_comp[ck].append(i)
+
+        # In-place pruning of high-frequency hub tokens
+        for k in list(idx_rare_tok.keys()):
+            if len(idx_rare_tok[k]) > 10000:
+                del idx_rare_tok[k]
+
+        for k in list(idx_rare_addr.keys()):
+            if len(idx_rare_addr[k]) > 600:
+                del idx_rare_addr[k]
+
+        del cand_df
+        gc.collect()
+        t_idx_total = time.perf_counter() - t_idx_start
+        print(f"  8 inverted indices built in {t_idx_total:.1f}s (RAM: {get_ram_mb():.1f} MB).", flush=True)
 
     # 4. Checkpoint Resumption
     processed_s1_count = 0
-    if checkpoint_file.exists() and matching_out.exists() and candidate_out.exists():
+    if limit is None and checkpoint_file.exists() and matching_out.exists() and candidate_out.exists():
         try:
             with open(checkpoint_file, "r", encoding="utf-8") as f:
                 ckpt = json.load(f)
@@ -489,21 +487,28 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
         except Exception:
             processed_s1_count = 0
 
-    mode = "a" if processed_s1_count > 0 else "w"
+    mode = "a" if (limit is None and processed_s1_count > 0) else "w"
     s1_path = test_dir / "test_source1.tsv"
-    print(f"\n[4/4] Streaming {s1_path} in chunks of {chunk_size:,} (mode='{mode}')...", flush=True)
+    effective_chunk = min(chunk_size, limit) if limit else chunk_size
+    print(f"\n[4/4] Streaming {s1_path} in chunks of {effective_chunk:,} (mode='{mode}')...", flush=True)
 
     s1_reader = pd.read_csv(s1_path, sep="\t", dtype=str, keep_default_na=False,
-                            encoding="utf-8", chunksize=chunk_size)
+                            encoding="utf-8", chunksize=effective_chunk)
 
     total_s1 = 0
     total_cand_pairs = 0
     total_matches = 0
+    total_singletons = 0
+
+    cum_cand_gen_time = 0.0
+    cum_feat_comp_time = 0.0
+    cum_score_time = 0.0
+    cum_write_time = 0.0
 
     with open(matching_out, mode, encoding="utf-8", newline="\n") as f_match, \
          open(candidate_out, mode, encoding="utf-8", newline="\n") as f_cand:
 
-        if processed_s1_count == 0:
+        if processed_s1_count == 0 or limit is not None:
             f_match.write("source1_entity_id\tmatched_entity_ids\n")
             f_cand.write("source1_entity_id\tcandidate_entity_ids\n")
 
@@ -515,12 +520,12 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
             n_chunk = len(s1_chunk)
             current_offset += n_chunk
 
-            if current_offset <= processed_s1_count:
+            if limit is None and current_offset <= processed_s1_count:
                 print(f"  Skipping already processed batch {batch_idx:3d} ({current_offset:,} S1 entities)...", flush=True)
                 total_s1 = current_offset
                 continue
 
-            b_start = time.time()
+            b_start = time.perf_counter()
             s1_ids = s1_chunk["entity_id"].values
             s1_raw_names = s1_chunk["business_name"].values
             s1_raw_addrs = s1_chunk["business_address"].values
@@ -531,7 +536,8 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
             s1_na = [fast_norm_addr(x) for x in s1_raw_addrs]
             s1_pc = [fast_get_postal(x) for x in s1_raw_addrs]
 
-            # Blocking Query
+            # Step A: Candidate Generation (Blocking)
+            t_cg0 = time.perf_counter()
             batch_pairs = []
             s1_cand_sets = []
 
@@ -548,25 +554,28 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
                     b = idx_phone.get(pk, [])
                     if len(b) <= 800: s_cands.update(b)
 
-                for w in get_rare_tokens(nn_v):
-                    b = idx_rare_tok.get(w, [])
-                    if len(b) <= 800: s_cands.update(b)
+                if nn_v:
+                    for w in nn_v.split():
+                        if len(w) >= 3:
+                            b = idx_rare_tok.get(w, [])
+                            if len(b) <= 800: s_cands.update(b)
 
                 pc_v = s1_pc[i]
                 if pc_v:
                     s_cands.update(idx_postal.get(pc_v, []))
 
                 na_v = s1_na[i]
-                for ak in get_addr_keys(na_v):
-                    b = idx_addr_key.get(ak, [])
-                    if len(b) <= 400: s_cands.update(b)
+                if na_v:
+                    for ak in get_addr_keys(na_v):
+                        b = idx_addr_key.get(ak, [])
+                        if len(b) <= 400: s_cands.update(b)
+                    for w in na_v.split():
+                        if len(w) >= 4 and not w.isdigit() and w not in ADDR_STOPWORDS:
+                            b = idx_rare_addr.get(w, [])
+                            if len(b) <= 400: s_cands.update(b)
 
                 for ck in get_name_addr_composite(nn_v, na_v):
                     b = idx_comp.get(ck, [])
-                    if len(b) <= 400: s_cands.update(b)
-
-                for w in get_rare_addr_tokens(na_v):
-                    b = idx_rare_addr.get(w, [])
                     if len(b) <= 400: s_cands.update(b)
 
                 if len(s_cands) > 50:
@@ -578,11 +587,15 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
                 for j in c_list:
                     batch_pairs.append((i, j))
 
+            t_cg = time.perf_counter() - t_cg0
+            cum_cand_gen_time += t_cg
+
             n_pairs = len(batch_pairs)
             total_cand_pairs += n_pairs
             s1_matches = [[] for _ in range(n_chunk)]
 
-            # Feature Extraction & Model Scoring
+            # Step B: Feature Extraction
+            t_fc0 = time.perf_counter()
             if n_pairs > 0:
                 X_batch = np.zeros((n_pairs, len(FEATURE_NAMES)), dtype=np.float32)
                 pair_meta = []
@@ -598,6 +611,11 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
                     X_batch[p_idx] = feat
                     pair_meta.append((s1_i, c_ids[cand_j], feat[30], feat[32], feat[3], feat[16], feat[47]))
 
+                t_fc = time.perf_counter() - t_fc0
+                cum_feat_comp_time += t_fc
+
+                # Step C: Model Scoring & Decision Rules
+                t_sc0 = time.perf_counter()
                 probs = model.predict(X_batch)
                 del X_batch
 
@@ -630,13 +648,22 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
                     s1_matches[s1_i] = accepted
                     total_matches += len(accepted)
 
-            # Write Output Rows
+                t_sc = time.perf_counter() - t_sc0
+                cum_score_time += t_sc
+            else:
+                t_fc = 0.0
+                t_sc = 0.0
+
+            # Step D: Output Writing (with matched ⊆ candidates guarantee)
+            t_w0 = time.perf_counter()
             for i in range(n_chunk):
                 sid = s1_ids[i]
                 c_set = s1_cand_sets[i]
                 m_list = s1_matches[i]
 
-                # Guaranteed subset rule: matched ⊆ candidates
+                if not m_list:
+                    total_singletons += 1
+
                 for mid in m_list:
                     c_set.add(mid)
 
@@ -648,26 +675,53 @@ def run_production_inference(test_dir: Path, output_dir: Path, model_path: Path,
 
             f_match.flush()
             f_cand.flush()
+            t_w = time.perf_counter() - t_w0
+            cum_write_time += t_w
 
+            # Memory cleanup
+            del batch_pairs, s1_cand_sets, s1_matches
+            if n_pairs > 0:
+                del pair_meta, s1_scores
+
+            b_total = time.perf_counter() - b_start
             total_s1 += n_chunk
-            print(f"  Batch {batch_idx:3d}: Processed {total_s1:,} / 1,732,544 S1 entities "
-                  f"({n_pairs:,} pairs scored, {time.time() - b_start:.1f}s)", flush=True)
+            print(f"  Batch {batch_idx:3d}: Processed {total_s1:,} S1 entities "
+                  f"({n_pairs:,} pairs scored, {b_total:.2f}s | "
+                  f"CandGen: {t_cg:.2f}s, Feat: {t_fc:.2f}s, Score: {t_sc:.2f}s, Write: {t_w:.2f}s | "
+                  f"RAM: {get_ram_mb():.1f} MB)", flush=True)
 
-            # Update checkpoint
-            with open(checkpoint_file, "w", encoding="utf-8") as f_ckpt:
-                json.dump({"processed_s1": total_s1, "timestamp": time.time()}, f_ckpt)
+            if limit is None:
+                with open(checkpoint_file, "w", encoding="utf-8") as f_ckpt:
+                    json.dump({"processed_s1": total_s1, "timestamp": time.time()}, f_ckpt)
 
             if limit and total_s1 >= limit:
-                print(f"  Reached limit of {limit:,} entities.", flush=True)
+                print(f"  Reached limit of {limit:,} entities. Benchmark complete.", flush=True)
                 break
 
+    t_total_run = time.perf_counter() - t_start
+    print("\n" + "=" * 75, flush=True)
+    print("DETAILED EXECUTION & TIMING REPORT", flush=True)
     print("=" * 75, flush=True)
-    print(f"INFERENCE COMPLETED IN {(time.time() - t_start)/60:.2f} MINUTES", flush=True)
-    print(f"  Total S1 Entities:     {total_s1:,}", flush=True)
-    print(f"  Total Candidate Pairs: {total_cand_pairs:,}", flush=True)
-    print(f"  Total Matches:         {total_matches:,}", flush=True)
-    print(f"  Matching Output:       {matching_out}", flush=True)
-    print(f"  Candidate Output:      {candidate_out}", flush=True)
+    print(f"  Startup & Model Load Time:      {t_model_load:.3f} s")
+    if t_cache_load > 0:
+        print(f"  Candidate Index Cache Load Time:{t_cache_load:.3f} s")
+    else:
+        print(f"  Candidate Loading Time:         {t_cand_load:.3f} s")
+        print(f"  Candidate Normalization Time:   {t_norm_total:.3f} s")
+        print(f"  Index Construction Time:        {t_idx_total:.3f} s")
+    print(f"  Candidate Generation Time:      {cum_cand_gen_time:.3f} s")
+    print(f"  Feature Computation Time:       {cum_feat_comp_time:.3f} s")
+    print(f"  Model Scoring & Decisions Time: {cum_score_time:.3f} s")
+    print(f"  Output Writing Time:            {cum_write_time:.3f} s")
+    print(f"  Total Elapsed Runtime:          {t_total_run:.3f} s ({(t_total_run/60):.2f} min)")
+    print(f"  Peak / Current RAM Usage:       {get_ram_mb():.1f} MB")
+    print(f"  Total S1 Entities Processed:    {total_s1:,}")
+    print(f"  Total Candidate Pairs Scored:   {total_cand_pairs:,} ({total_cand_pairs/max(total_s1,1):.1f} cands/S1)")
+    print(f"  Total Predicted Matches:        {total_matches:,}")
+    print(f"  Total Empty / Singletons:       {total_singletons:,} ({100*total_singletons/max(total_s1,1):.1f}%)")
+    print(f"  Throughput Speed:               {total_s1/max(cum_cand_gen_time+cum_feat_comp_time+cum_score_time+cum_write_time, 0.001):.1f} S1 entities/sec")
+    print(f"  Matching Output Path:           {matching_out}")
+    print(f"  Candidate Output Path:          {candidate_out}")
     print("=" * 75, flush=True)
 
 
@@ -684,3 +738,4 @@ if __name__ == "__main__":
 
     run_production_inference(test_dir, output_dir, model_path,
                              chunk_size=args.chunk_size, limit=args.limit)
+    os._exit(0)
