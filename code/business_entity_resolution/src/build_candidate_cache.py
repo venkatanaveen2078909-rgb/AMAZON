@@ -20,12 +20,24 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 # Paths
-ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent
-STUDENT_RES_DIR = ROOT_DIR / "6ab10eb3b23ba_student_resource" / "student_resource"
-TEST_DIR = STUDENT_RES_DIR / "dataset" / "test"
-CACHE_DIR = ROOT_DIR / "code" / "business_entity_resolution" / "cache"
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
-CACHE_FILE = CACHE_DIR / "test_candidate_index.pkl"
+def resolve_paths():
+    curr = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
+    root = curr
+    for _ in range(5):
+        if (root / "6ab10eb3b23ba_student_resource").exists():
+            break
+        root = root.parent
+    
+    base_res = root / "6ab10eb3b23ba_student_resource" / "student_resource" / "dataset"
+    if base_res.exists():
+        test_dir = base_res / "test"
+    else:
+        test_dir = root / "dataset" / "test"
+        
+    cache_dir = root / "code" / "business_entity_resolution" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "test_candidate_index.pkl"
+    return test_dir, cache_dir, cache_file
 
 _LEGAL = re.compile(
     r'\b(llc|llp|inc|incorporated|corp|corporation|co|company|ltd|limited|plc|lp|'
@@ -125,14 +137,15 @@ def get_name_addr_composite(nn_str: str, na_str: str) -> tuple:
     return ()
 
 def main():
+    test_dir, cache_dir, cache_file = resolve_paths()
     t_start = time.perf_counter()
     print("=" * 75, flush=True)
     print("BUILDING REUSABLE CANDIDATE INDEX & NORMALIZATION CACHE", flush=True)
     print("=" * 75, flush=True)
 
     # 1. Load Candidate Datasets
-    s2_path = TEST_DIR / "test_source2.tsv"
-    s3_path = TEST_DIR / "test_source3.tsv"
+    s2_path = test_dir / "test_source2.tsv"
+    s3_path = test_dir / "test_source3.tsv"
 
     print(f"Loading {s2_path} and {s3_path}...", flush=True)
     t0 = time.perf_counter()
@@ -223,7 +236,7 @@ def main():
     print(f"Indices constructed in {time.perf_counter()-t_idx:.1f}s.", flush=True)
 
     # 4. Save Cache
-    print(f"Saving serialized cache to {CACHE_FILE}...", flush=True)
+    print(f"Saving serialized cache to {cache_file}...", flush=True)
     t_save = time.perf_counter()
     cache_payload = {
         "n_cands": n_cands,
@@ -245,12 +258,13 @@ def main():
         "idx_rare_addr": idx_rare_addr,
         "memoizer_memo": memoizer.memo
     }
-    with open(CACHE_FILE, "wb") as f:
+    with open(cache_file, "wb") as f:
         pickle.dump(cache_payload, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-    cache_size_mb = os.path.getsize(CACHE_FILE) / (1024 * 1024)
+    cache_size_mb = os.path.getsize(cache_file) / (1024 * 1024)
     print(f"Saved cache file ({cache_size_mb:.1f} MB) in {time.perf_counter()-t_save:.1f}s.", flush=True)
     print(f"Total build time: {time.perf_counter()-t_start:.1f}s.", flush=True)
 
 if __name__ == "__main__":
     main()
+    os._exit(0)
